@@ -153,12 +153,3 @@ with st.form("prediction_form"):
             st.info("Disclaimer: This prediction is based on the trained model and provided input. It should be used for informational purposes only.")
 
 
-%%writefile requirements.txt
-streamlit
-pandas
-numpy
-scikit-learn
-xgboost
-lightgbm
-catboost
-joblib
