@@ -1,155 +1,164 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import pickle
 
-# Load the trained model, scaler, and encoders
-# Ensure these files are in the same directory as your app.py on Streamlit Cloud
-model = joblib.load('XGBoost_best_model.pkl')
-scaler = joblib.load('scaler.pkl')
-encoders = joblib.load('encoder.pkl')
+# -------------------------------
+# LOAD ARTIFACTS (SAFE + CACHED)
+# -------------------------------
+@st.cache_resource
+def load_artifacts():
+    try:
+        model = joblib.load('XGBoost_best_model.pkl')
+        scaler = joblib.load('scaler.pkl')
+        encoders = joblib.load('encoder.pkl')
+        return model, scaler, encoders
+    except Exception as e:
+        st.error(f"❌ Error loading model files: {e}")
+        st.stop()
 
-# Define the preprocessing function
-def preprocess_input(input_df, scaler, encoders):
-    processed_df = input_df.copy()
+model, scaler, encoders = load_artifacts()
 
-    # Apply Label Encoding for 'Product_importance' and 'Gender'
+# -------------------------------
+# PREPROCESS FUNCTION
+# -------------------------------
+def preprocess_input(input_df):
+    df = input_df.copy()
+
+    # -------------------------------
+    # LABEL ENCODING (SAFE)
+    # -------------------------------
     for col in ['Product_importance', 'Gender']:
         if col in encoders:
             le = encoders[col]
-            processed_df[col] = le.transform(processed_df[col])
+
+            if df[col].iloc[0] not in le.classes_:
+                st.error(f"Unknown category '{df[col].iloc[0]}' in {col}")
+                st.stop()
+
+            df[col] = le.transform(df[col])
         else:
-            st.error(f"LabelEncoder for {col} not found.")
-            return None
+            st.error(f"Encoder missing for {col}")
+            st.stop()
 
-    # One-Hot Encode nominal categorical columns
-    warehouse_block_dummies = pd.get_dummies(processed_df['Warehouse_block'], prefix='Warehouse_block', drop_first=True)
-    mode_of_shipment_dummies = pd.get_dummies(processed_df['Mode_of_Shipment'], prefix='Mode_of_Shipment', drop_first=True)
+    # -------------------------------
+    # ONE-HOT ENCODING
+    # -------------------------------
+    df = pd.get_dummies(df, columns=['Warehouse_block', 'Mode_of_Shipment'], drop_first=True)
 
-    processed_df = pd.concat([processed_df.drop(columns=['Warehouse_block', 'Mode_of_Shipment']), 
-                              warehouse_block_dummies, 
-                              mode_of_shipment_dummies], axis=1)
+    # -------------------------------
+    # SCALE ONLY BASE NUMERICAL FEATURES
+    # -------------------------------
+    try:
+        scaler_cols = scaler.feature_names_in_
+    except:
+        scaler_cols = [
+            'Customer_care_calls',
+            'Customer_rating',
+            'Cost_of_the_Product',
+            'Prior_purchases',
+            'Discount_offered',
+            'Weight_in_gms'
+        ]
 
-    # Ensure all boolean columns are converted to int (0/1)
-    for col in processed_df.select_dtypes(include='bool').columns:
-        processed_df[col] = processed_df[col].astype(int)
+    for col in scaler_cols:
+        if col not in df.columns:
+            df[col] = 0
 
-    # Feature Engineering (same as in training)
-    processed_df['Cost_to_Weight_ratio'] = processed_df['Cost_of_the_Product'] / processed_df['Weight_in_gms']
-    processed_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    processed_df['Cost_to_Weight_ratio'].fillna(processed_df['Cost_to_Weight_ratio'].median(), inplace=True)
+    df[scaler_cols] = scaler.transform(df[scaler_cols])
 
-    processed_df['Cost*Weight'] = processed_df['Cost_of_the_Product'] * processed_df['Weight_in_gms']
-    processed_df['Discount_Ratio'] = processed_df['Discount_offered'] / processed_df['Cost_of_the_Product']
-    processed_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    processed_df.fillna(0, inplace=True) # Fill any remaining NaNs after new features
+    # -------------------------------
+    # FEATURE ENGINEERING (AFTER SCALING)
+    # -------------------------------
+    df['Cost_to_Weight_ratio'] = df['Cost_of_the_Product'] / (df['Weight_in_gms'] + 1)
+    df['Cost*Weight'] = df['Cost_of_the_Product'] * df['Weight_in_gms']
+    df['Discount_Ratio'] = df['Discount_offered'] / (df['Cost_of_the_Product'] + 1)
+    df['CareCalls_to_Purchases'] = df['Customer_care_calls'] / (df['Prior_purchases'] + 1)
+    df['CostWeight_Discount_Interaction'] = df['Cost_to_Weight_ratio'] * (df['Discount_offered'] + 1)
 
-    processed_df['CareCalls_to_Purchases'] = processed_df['Customer_care_calls'] / (processed_df['Prior_purchases'] + 1)
-    processed_df['CostWeight_Discount_Interaction'] = processed_df['Cost_to_Weight_ratio'] * (processed_df['Discount_offered'] + 1)
-    processed_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    processed_df.fillna(processed_df.median(numeric_only=True), inplace=True)
+    df.replace([np.inf, -np.inf], 0, inplace=True)
+    df.fillna(0, inplace=True)
 
-    # Define numerical columns for scaling
-    num_cols = ['Customer_care_calls', 'Customer_rating', 'Cost_of_the_Product',
-                'Prior_purchases', 'Discount_offered', 'Weight_in_gms',
-                'Cost_to_Weight_ratio', 'Cost*Weight', 'Discount_Ratio',
-                'CareCalls_to_Purchases', 'CostWeight_Discount_Interaction']
+    # -------------------------------
+    # FINAL COLUMN ALIGNMENT
+    # -------------------------------
+    try:
+        final_cols = model.feature_names_in_
+    except:
+        final_cols = df.columns
 
-    # Apply StandardScaler to numerical columns
-    processed_df[num_cols] = scaler.transform(processed_df[num_cols])
+    for col in final_cols:
+        if col not in df.columns:
+            df[col] = 0
 
-    # Ensure all columns from training are present and in the correct order
-    # (This is a crucial step for consistent predictions)
-    # Get columns from the original training data (assuming X_train has all features in correct order)
-    # You would need to save X_train.columns to a file or hardcode them if not available
-    # For this example, let's assume `model.feature_names_in_` is available or reconstruct from notebook state
+    df = df[final_cols]
 
-    # Manually reconstruct the columns based on the notebook's X_train (excluding 'ID' for model input if not used)
-    # Assuming 'ID' was dropped before training the actual model input features
-    # The columns from the notebook state (X_train) are:
-    training_columns = ['ID', 'Customer_care_calls', 'Customer_rating', 'Cost_of_the_Product',
-                        'Prior_purchases', 'Product_importance', 'Gender', 'Discount_offered',
-                        'Weight_in_gms', 'Warehouse_block_B', 'Warehouse_block_C',
-                        'Warehouse_block_D', 'Warehouse_block_F', 'Mode_of_Shipment_Road',
-                        'Mode_of_Shipment_Ship', 'Cost_to_Weight_ratio', 'Cost*Weight',
-                        'Discount_Ratio', 'CareCalls_to_Purchases', 'CostWeight_Discount_Interaction']
+    return df
 
-    # Drop 'ID' if it's not used by the model for prediction (which is typical)
-    if 'ID' in processed_df.columns and 'ID' not in model.feature_names_in_:
-        processed_df = processed_df.drop(columns=['ID'])
-        training_columns.remove('ID') # Adjust training_columns if ID is dropped
 
-    # Reorder and add missing columns with default value 0
-    final_columns = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else training_columns
+# -------------------------------
+# STREAMLIT UI
+# -------------------------------
+st.set_page_config(page_title="Shipment Predictor", layout="wide")
+st.title("📦 Shipment On-Time Delivery Predictor")
 
-    for col in final_columns:
-        if col not in processed_df.columns:
-            processed_df[col] = 0 # Add missing one-hot encoded columns as 0
-    processed_df = processed_df[final_columns]
-
-    return processed_df
-
-# Streamlit UI
-st.set_page_config(page_title="ShipmentSure Predictor", layout="wide")
-st.title("📦 ShipmentSure: On-Time Delivery Predictor")
-st.markdown("Enter shipment details to predict if it will be delivered on time.")
+st.markdown("Enter shipment details below:")
 
 with st.form("prediction_form"):
-    st.header("Shipment Details")
-
     col1, col2, col3 = st.columns(3)
 
     with col1:
         warehouse_block = st.selectbox("Warehouse Block", ['A', 'B', 'C', 'D', 'F'])
-        mode_of_shipment = st.selectbox("Mode of Shipment", ['Flight', 'Road', 'Ship'])
-        customer_care_calls = st.slider("Customer Care Calls", 2, 7, 4)
-        customer_rating = st.slider("Customer Rating (1-5)", 1, 5, 3)
+        mode = st.selectbox("Mode of Shipment", ['Flight', 'Road', 'Ship'])
+        care_calls = st.slider("Customer Care Calls", 2, 7, 4)
+        rating = st.slider("Customer Rating", 1, 5, 3)
 
     with col2:
-        cost_of_the_product = st.number_input("Cost of the Product (in USD)", 90, 320, 200)
-        prior_purchases = st.slider("Prior Purchases", 2, 10, 3)
-        product_importance = st.selectbox("Product Importance", ['low', 'medium', 'high'])
+        cost = st.number_input("Cost of Product", 90, 320, 200)
+        purchases = st.slider("Prior Purchases", 2, 10, 3)
+        importance = st.selectbox("Product Importance", ['low', 'medium', 'high'])
         gender = st.selectbox("Gender", ['M', 'F'])
 
     with col3:
-        discount_offered = st.number_input("Discount Offered (in %)", 1, 65, 10)
-        weight_in_gms = st.number_input("Weight in gms", 1000, 8000, 3000)
+        discount = st.number_input("Discount Offered (%)", 1, 65, 10)
+        weight = st.number_input("Weight (gms)", 1000, 8000, 3000)
 
-    submit_button = st.form_submit_button("Predict Delivery Status")
+    submit = st.form_submit_button("Predict")
 
-    if submit_button:
-        # Create a DataFrame from input
-        input_data = pd.DataFrame({
-            'ID': [0], # Placeholder ID
+    if submit:
+        input_df = pd.DataFrame({
+            'ID': [0],
             'Warehouse_block': [warehouse_block],
-            'Mode_of_Shipment': [mode_of_shipment],
-            'Customer_care_calls': [customer_care_calls],
-            'Customer_rating': [customer_rating],
-            'Cost_of_the_Product': [cost_of_the_product],
-            'Prior_purchases': [prior_purchases],
-            'Product_importance': [product_importance],
+            'Mode_of_Shipment': [mode],
+            'Customer_care_calls': [care_calls],
+            'Customer_rating': [rating],
+            'Cost_of_the_Product': [cost],
+            'Prior_purchases': [purchases],
+            'Product_importance': [importance],
             'Gender': [gender],
-            'Discount_offered': [discount_offered],
-            'Weight_in_gms': [weight_in_gms]
+            'Discount_offered': [discount],
+            'Weight_in_gms': [weight]
         })
 
-        # Preprocess the input data
-        processed_input = preprocess_input(input_data, scaler, encoders)
+        processed = preprocess_input(input_df)
 
-        if processed_input is not None:
-            # Make prediction
-            prediction = model.predict(processed_input)
-            prediction_proba = model.predict_proba(processed_input)[:, 1]
+        prediction = model.predict(processed)[0]
+        probability = model.predict_proba(processed)[0][1]
 
-            st.subheader("Prediction Results:")
-            if prediction[0] == 1:
-                st.success(f"The shipment is predicted to **reach on time!** (Probability: {prediction_proba[0]:.2f})")
-            else:
-                st.error(f"The shipment is predicted to **NOT reach on time.** (Probability: {prediction_proba[0]:.2f})")
+        st.subheader("📊 Prediction Result")
 
-            st.write("--- ")
-            st.info("Disclaimer: This prediction is based on the trained model and provided input. It should be used for informational purposes only.")
+        if prediction == 1:
+            st.success(f"✅ On-Time Delivery (Confidence: {probability:.2f})")
+        else:
+            st.error(f"❌ Delayed Delivery (Confidence: {probability:.2f})")
 
+        st.progress(float(probability))
 
+        if probability > 0.8:
+            st.write("🟢 High Confidence")
+        elif probability > 0.6:
+            st.write("🟡 Medium Confidence")
+        else:
+            st.write("🔴 Low Confidence")
+
+        st.info("⚠️ This prediction is based on ML model and may not be 100% accurate.")
