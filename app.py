@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import matplotlib.pyplot as plt
 
 # -------------------------------
 # LOAD ARTIFACTS (SAFE + CACHED)
@@ -25,30 +26,22 @@ model, scaler, encoders = load_artifacts()
 def preprocess_input(input_df):
     df = input_df.copy()
 
-    # -------------------------------
-    # LABEL ENCODING (SAFE)
-    # -------------------------------
+    # LABEL ENCODING
     for col in ['Product_importance', 'Gender']:
         if col in encoders:
             le = encoders[col]
-
             if df[col].iloc[0] not in le.classes_:
                 st.error(f"Unknown category '{df[col].iloc[0]}' in {col}")
                 st.stop()
-
             df[col] = le.transform(df[col])
         else:
             st.error(f"Encoder missing for {col}")
             st.stop()
 
-    # -------------------------------
     # ONE-HOT ENCODING
-    # -------------------------------
     df = pd.get_dummies(df, columns=['Warehouse_block', 'Mode_of_Shipment'], drop_first=True)
 
-    # -------------------------------
-    # SCALE ONLY BASE NUMERICAL FEATURES
-    # -------------------------------
+    # SCALE NUMERICAL FEATURES
     try:
         scaler_cols = scaler.feature_names_in_
     except:
@@ -67,9 +60,7 @@ def preprocess_input(input_df):
 
     df[scaler_cols] = scaler.transform(df[scaler_cols])
 
-    # -------------------------------
-    # FEATURE ENGINEERING (AFTER SCALING)
-    # -------------------------------
+    # FEATURE ENGINEERING
     df['Cost_to_Weight_ratio'] = df['Cost_of_the_Product'] / (df['Weight_in_gms'] + 1)
     df['Cost*Weight'] = df['Cost_of_the_Product'] * df['Weight_in_gms']
     df['Discount_Ratio'] = df['Discount_offered'] / (df['Cost_of_the_Product'] + 1)
@@ -79,9 +70,7 @@ def preprocess_input(input_df):
     df.replace([np.inf, -np.inf], 0, inplace=True)
     df.fillna(0, inplace=True)
 
-    # -------------------------------
     # FINAL COLUMN ALIGNMENT
-    # -------------------------------
     try:
         final_cols = model.feature_names_in_
     except:
@@ -95,6 +84,27 @@ def preprocess_input(input_df):
 
     return df
 
+# -------------------------------
+# FEATURE IMPORTANCE FUNCTION
+# -------------------------------
+def plot_feature_importance(model, feature_names):
+    try:
+        importances = model.feature_importances_
+
+        feat_imp = pd.DataFrame({
+            'Feature': feature_names,
+            'Importance': importances
+        }).sort_values(by='Importance', ascending=False).head(15)
+
+        fig, ax = plt.subplots()
+        ax.barh(feat_imp['Feature'], feat_imp['Importance'])
+        ax.invert_yaxis()
+        ax.set_title("Top Feature Importances")
+
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.warning(f"⚠️ Feature importance not available: {e}")
 
 # -------------------------------
 # STREAMLIT UI
@@ -142,8 +152,12 @@ with st.form("prediction_form"):
 
         processed = preprocess_input(input_df)
 
-        prediction = model.predict(processed)[0]
+        # -------------------------------
+        # PREDICTION WITH THRESHOLD = 0.5
+        # -------------------------------
         probability = model.predict_proba(processed)[0][1]
+        threshold = 0.5
+        prediction = 1 if probability >= threshold else 0
 
         st.subheader("📊 Prediction Result")
 
@@ -162,3 +176,10 @@ with st.form("prediction_form"):
             st.write("🔴 Low Confidence")
 
         st.info("⚠️ This prediction is based on ML model and may not be 100% accurate.")
+
+        # -------------------------------
+        # FEATURE IMPORTANCE (OPTIONAL)
+        # -------------------------------
+        if st.checkbox("Show Feature Importance"):
+            st.subheader("📌 Feature Importance")
+            plot_feature_importance(model, processed.columns)
