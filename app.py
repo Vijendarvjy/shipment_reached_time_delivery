@@ -156,7 +156,7 @@ with st.form("prediction_form"):
         # PREDICTION WITH THRESHOLD = 0.5
         # -------------------------------
         probability = model.predict_proba(processed)[0][1]
-        threshold = 0.5
+        threshold = 0.7
         prediction = 1 if probability >= threshold else 0
 
         st.subheader("📊 Prediction Result")
